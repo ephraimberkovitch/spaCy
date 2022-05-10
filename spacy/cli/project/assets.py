@@ -1,6 +1,7 @@
 from typing import Any, Dict, Optional
 from pathlib import Path
 from wasabi import msg
+import os
 import re
 import shutil
 import requests
@@ -11,6 +12,9 @@ from .._util import project_cli, Arg, Opt, PROJECT_FILE, load_project_config
 from .._util import get_checksum, download_file, git_checkout, get_git_version
 from .._util import SimpleFrozenDict, parse_config_overrides
 
+# Whether assets are extra if `extra` is not set.
+EXTRA_DEFAULT = False
+
 
 @project_cli.command(
     "assets",
@@ -20,7 +24,8 @@ def project_assets_cli(
     # fmt: off
     ctx: typer.Context,  # This is only used to read additional arguments
     project_dir: Path = Arg(Path.cwd(), help="Path to cloned project. Defaults to current working directory.", exists=True, file_okay=False),
-    sparse_checkout: bool = Opt(False, "--sparse", "-S", help="Use sparse checkout for assets provided via Git, to only check out and clone the files needed. Requires Git v22.2+.")
+    sparse_checkout: bool = Opt(False, "--sparse", "-S", help="Use sparse checkout for assets provided via Git, to only check out and clone the files needed. Requires Git v22.2+."),
+    extra: bool = Opt(False, "--extra", "-e", help="Download all assets, including those marked as 'extra'.")
     # fmt: on
 ):
     """Fetch project assets like datasets and pretrained weights. Assets are
@@ -31,7 +36,12 @@ def project_assets_cli(
     DOCS: https://spacy.io/api/cli#project-assets
     """
     overrides = parse_config_overrides(ctx.args)
-    project_assets(project_dir, overrides=overrides, sparse_checkout=sparse_checkout)
+    project_assets(
+        project_dir,
+        overrides=overrides,
+        sparse_checkout=sparse_checkout,
+        extra=extra,
+    )
 
 
 def project_assets(
@@ -39,17 +49,29 @@ def project_assets(
     *,
     overrides: Dict[str, Any] = SimpleFrozenDict(),
     sparse_checkout: bool = False,
+    extra: bool = False,
 ) -> None:
     """Fetch assets for a project using DVC if possible.
 
     project_dir (Path): Path to project directory.
+    sparse_checkout (bool): Use sparse checkout for assets provided via Git, to only check out and clone the files
+                            needed.
+    extra (bool): Whether to download all assets, including those marked as 'extra'.
     """
     project_path = ensure_path(project_dir)
     config = load_project_config(project_path, overrides=overrides)
-    assets = config.get("assets", {})
+    assets = [
+        asset
+        for asset in config.get("assets", [])
+        if extra or not asset.get("extra", EXTRA_DEFAULT)
+    ]
     if not assets:
-        msg.warn(f"No assets specified in {PROJECT_FILE}", exits=0)
+        msg.warn(
+            f"No assets specified in {PROJECT_FILE} (if assets are marked as extra, download them with --extra)",
+            exits=0,
+        )
     msg.info(f"Fetching {len(assets)} asset(s)")
+
     for asset in assets:
         dest = (project_dir / asset["dest"]).resolve()
         checksum = asset.get("checksum")
@@ -129,10 +151,17 @@ def fetch_asset(
         the asset failed.
     """
     dest_path = (project_path / dest).resolve()
-    if dest_path.exists() and checksum:
+    if dest_path.exists():
         # If there's already a file, check for checksum
-        if checksum == get_checksum(dest_path):
-            msg.good(f"Skipping download with matching checksum: {dest}")
+        if checksum:
+            if checksum == get_checksum(dest_path):
+                msg.good(f"Skipping download with matching checksum: {dest}")
+                return
+        else:
+            # If there's not a checksum, make sure the file is a possibly valid size
+            if os.path.getsize(dest_path) == 0:
+                msg.warn(f"Asset exists but with size of 0 bytes, deleting: {dest}")
+                os.remove(dest_path)
     # We might as well support the user here and create parent directories in
     # case the asset dir isn't listed as a dir to create in the project.yml
     if not dest_path.parent.exists():

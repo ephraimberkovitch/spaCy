@@ -1,5 +1,5 @@
 cimport numpy as np
-from libc.stdint cimport uint32_t
+from libc.stdint cimport uint32_t, uint64_t
 from cython.operator cimport dereference as deref
 from libcpp.set cimport set as cppset
 from murmurhash.mrmr cimport hash128_x64
@@ -10,7 +10,7 @@ from typing import cast
 import warnings
 from enum import Enum
 import srsly
-from thinc.api import get_array_module, get_current_ops
+from thinc.api import Ops, get_array_module, get_current_ops
 from thinc.backends import get_array_ops
 from thinc.types import Floats2d
 
@@ -146,7 +146,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#size
         """
-        return self.data.shape[0] * self.data.shape[1]
+        return self.data.size
 
     @property
     def is_full(self):
@@ -170,6 +170,8 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#n_keys
         """
+        if self.mode == Mode.floret:
+            return -1
         return len(self.key2row)
 
     def __reduce__(self):
@@ -274,7 +276,7 @@ cdef class Vectors:
             self.data = resized_array
         self._sync_unset()
         removed_items = []
-        for key, row in list(self.key2row.items()):
+        for key, row in self.key2row.copy().items():
             if row >= shape[0]:
                 self.key2row.pop(key)
                 removed_items.append((key, row))
@@ -353,12 +355,18 @@ cdef class Vectors:
         key (str): The string key.
         RETURNS: A list of the integer hashes.
         """
-        cdef uint32_t[4] out
+        # MurmurHash3_x64_128 returns an array of 2 uint64_t values.
+        cdef uint64_t[2] out
         chars = s.encode("utf8")
         cdef char* utf8_string = chars
         hash128_x64(utf8_string, len(chars), self.hash_seed, &out)
-        rows = [out[i] for i in range(min(self.hash_count, 4))]
-        return rows
+        rows = [
+            out[0] & 0xffffffffu,
+            out[0] >> 32,
+            out[1] & 0xffffffffu,
+            out[1] >> 32,
+        ]
+        return rows[:min(self.hash_count, 4)]
 
     def _get_ngrams(self, unicode key):
         """Get all padded ngram strings using the ngram settings.
@@ -511,6 +519,9 @@ cdef class Vectors:
                     for i in range(len(queries)) ], dtype="uint64")
         return (keys, best_rows, scores)
 
+    def to_ops(self, ops: Ops):
+        self.data = ops.asarray(self.data)
+
     def _get_cfg(self):
         if self.mode == Mode.default:
             return {
@@ -554,8 +565,9 @@ cdef class Vectors:
             # the source of numpy.save indicates that the file object is closed after use.
             # but it seems that somehow this does not happen, as ResourceWarnings are raised here.
             # in order to not rely on this, wrap in context manager.
+            ops = get_current_ops()
             with path.open("wb") as _file:
-                save_array(self.data, _file)
+                save_array(ops.to_numpy(self.data, byte_order="<"), _file)
 
         serializers = {
             "strings": lambda p: self.strings.to_disk(p.with_suffix(".json")),
@@ -591,6 +603,7 @@ cdef class Vectors:
             ops = get_current_ops()
             if path.exists():
                 self.data = ops.xp.load(str(path))
+            self.to_ops(ops)
 
         def load_settings(path):
             if path.exists():
@@ -620,7 +633,8 @@ cdef class Vectors:
             if hasattr(self.data, "to_bytes"):
                 return self.data.to_bytes()
             else:
-                return srsly.msgpack_dumps(self.data)
+                ops = get_current_ops()
+                return srsly.msgpack_dumps(ops.to_numpy(self.data, byte_order="<"))
 
         serializers = {
             "strings": lambda: self.strings.to_bytes(),
@@ -645,6 +659,8 @@ cdef class Vectors:
             else:
                 xp = get_array_module(self.data)
                 self.data = xp.asarray(srsly.msgpack_loads(b))
+                ops = get_current_ops()
+                self.to_ops(ops)
 
         deserializers = {
             "strings": lambda b: self.strings.from_bytes(b),
