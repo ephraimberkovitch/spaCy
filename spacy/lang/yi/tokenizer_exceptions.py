@@ -17,7 +17,7 @@ _exc = {
     "über'm": [{ORTH: "über"}, {ORTH: "'m", NORM: "dem"}],
 }
 
-
+"""
 for exc_data in [
     {ORTH: "'S", NORM: "'s"},
     {ORTH: "'s", NORM: "'s"},
@@ -230,6 +230,11 @@ for orth in [
     "wiss.",
 ]:
     _exc[orth] = [{ORTH: orth}]
-
+"""
 
 TOKENIZER_EXCEPTIONS = update_exc(BASE_EXCEPTIONS, _exc)
+"""
+האסטו, ביסטו, ווילסטו, דארפסטו
+אויפן, אינעם, הינטערן
+ס׳האט, ר׳האט, מ׳האט
+"""
